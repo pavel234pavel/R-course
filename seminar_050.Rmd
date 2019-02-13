@@ -1,0 +1,332 @@
+---
+title: "Семинар 5. Кластерный анализ — окончание"
+editor_options:
+  chunk_output_type: console
+date: "Октябрь 8, 2018"
+output:
+  pdf_document: 
+    toc: false
+    toc_depth: 2
+    keep_tex: yes
+    number_sections: true
+    fig_width: 5
+    fig_height: 4
+    fig_caption: true
+    highlight: tango
+    latex_engine: xelatex
+  word_document:
+    toc: yes
+  html_document:
+    keep_md: no
+    number_sections: yes
+    toc: yes
+lang: ru-RU
+mainfont: Arial
+header-includes:
+- \newfontfamily{\cyrillicfonttt}{Arial}
+- \newfontfamily{\cyrillicfont}{Arial}
+- \newfontfamily{\cyrillicfontsf}{Arial}
+---
+
+
+Подключаем пакеты!
+
+Все с официального репозитория кроме одного:
+```{r, eval=FALSE}
+devtools::install_github("thomasp85/patchwork")
+```
+
+
+
+```{r, "setup-chunk", message=FALSE, warning=FALSE}
+library(tidyverse) # обработка данных, графики...
+library(skimr) # описательные статистики
+library(rio) # импорт фантастического количества форматов данных
+
+library(cluster) # кластерный анализ
+library(factoextra) # визуализации kmeans, pca
+library(dendextend) # визуализация дендрограмм
+
+library(corrplot) # визуализация корреляций
+
+library(broom) # метла превращает результаты оценивания моделей в таблички
+
+library(naniar) # визуализация пропущенных значений
+library(visdat) # визуализация пропущенных значений
+
+library(patchwork) # удобное расположение графиков рядом
+
+library(nycflights13) # данные о полётах в Нью-Йорке
+```
+
+
+# Кластеризация k-средних — продолжение :)
+
+Для примера возьмём данные по потреблению протеинов Европе из книги [Practial Machine Learning Cookbook](https://github.com/PacktPublishing/Practical-Machine-Learning-Cookbook/blob/master/Chapter%2003/Data/Europenaprotein.csv).
+Сначала, как всегда, загрузим их и посмотрим описательные статистики.
+
+```{r}
+protein <- import("data/Europenaprotein.csv")
+skim(protein)
+```
+
+## Масштабирование переменных
+
+Для того, чтобы сравнивать переменные с разными единицами измерения, их масштабируют:
+вычитают среднее и делят на оценку стандартного отклонения.
+
+\[
+x_i^* = (x_i - \bar x) / \hat \sigma_x,
+\]
+где $\bar x = \frac{x_1 + x_2 + \ldots + x_n}{n}$, а
+\[
+\hat\sigma_x = \frac{(x_1 - \bar x)^2 + \ldots + (x_n - \bar x)^2}{n-1}.
+\]
+
+
+Отмасштабируем данные с помощью встроенной функции `scale()`.
+Поскольку она может работать только с числами, первый столбец `Country` ей передавать не нужно.
+Результат сохраним в таблице `protein_stand`.
+
+## Кластеризация k-средних
+
+```{r}
+protein_stand <- mutate_if(protein, is.numeric, ~ as.vector(scale(.)))
+skim(protein_stand)
+```
+
+Дополнение в виде функции `as.vector` нужно потому, что функция `scale` возвращает матрицу,
+а каждый столбец должен быть вектором :)
+
+Выполним кластеризацию методом k-средних с помощью функции `kmeans`.
+Название страны не используется для кластеризации, но нужно для меток на графиках.
+Поэтому мы уберем столбец `Country` из набора данных и превратим его в метки строк.
+
+В качестве аргументов укажем отмасштабированные данные `protein_no_country` и количество кластеров `centers`.
+Пока мы не знаем, как выбирать оптимальное количество кластеров, поэтому предположим, что их три.
+Сохраним результат этого действия в список `k_means_protein`.
+
+```{r}
+protein_no_country <- protein_stand %>% column_to_rownames(var = "Country")
+set.seed(777)
+k_means_protein <- kmeans(protein_no_country, centers = 3)
+k_means_protein
+```
+
+
+Осталось только визуализировать результаты!
+Для этого будем использовать команду `fviz_cluster()` из пакета `factoextra`.
+Её аргументы — результат кластеризации `k_means_protein`,
+исходные данные и ещё куча настроек вроде размера точек и цвета наблюдений-выбросов.
+Мы только попросим выделять цветом кластеры по их границам и укажем аргумент `ellipse.type = 'convex'`.
+
+```{r, echo=FALSE}
+fviz_cluster(object = k_means_protein, data = protein_no_country,
+             ellipse.type = "convex")
+k_means_protein$cluster
+
+
+```
+
+## Выбор числа кластеров
+
+Как понять, сколько кластеров брать оптимально?
+Один из способов сделать это — воспользоваться командой `fviz_nbclust` из пакета `factoextra`.
+
+
+```{r}
+set.seed(1)
+g1 <- fviz_nbclust(protein_no_country, kmeans, method = "wss") +
+  labs(subtitle = "Elbow method")
+
+
+g2 <- fviz_nbclust(protein_no_country, kmeans, method = "silhouette") +
+  labs(subtitle = "Silhouette method")
+g2
+
+g3 <- fviz_nbclust(protein_no_country, kmeans, method = "gap_stat") +
+  labs(subtitle = "Gap statistic method")
+(g1 / g2) | g3
+```
+
+# Иерархическая кластеризация
+
+Можно визуализировать матрицу расстояний:
+
+```{r}
+protein_dist <- dist(protein_no_country, method = "euclidian")
+fviz_dist(protein_dist)
+```
+
+
+Другой способ разбить данные на группы — иерархическая кластеризация.
+
+```{r}
+protein_hcl <- hcut(protein_no_country, k = 4)
+```
+
+С помощью функции `fviz_dend` визуализируем результат кластеризации.
+Укажем несколько аргументов, чтобы сделать дендрограмму красивее,
+а полный перечень найдётся в справке.
+
+```{r}
+fviz_dend(protein_hcl,
+          cex = 0.5, # размер подписи
+          color_labels_by_k = TRUE) # цвет подписей по группам
+```
+
+Выявленные кластеры можно добавить к исходным данным!
+```{r}
+protein_plus2 <- mutate(protein, cluster = protein_hcl$cluster)
+glimpse(protein_plus2)
+```
+
+## Визуализация корреляций
+
+Иерархичская кластеризация полезна и для визуализаций корреляций.
+Если в функции `corrplot()` из одноимённого пакета указать аргумента `order = "hclust"`,
+то мы получим сгруппированные по кластерам переменные.
+Для красоты добавим ещё один аргумент — `addrect = 3`.
+Он обведёт прямоугольниками указанное число кластеров.
+
+```{r}
+protein_cor <- cor(protein_no_country)
+protein_cor
+corrplot(protein_cor, order = "hclust", addrect = 2)
+```
+
+
+
+# Упражнения
+
+* Упражнение 1.
+
+- Посмотрите на описательные статистики встроенного набора данных об арестах в США.
+- Отмасштабируйте данные и сохраните их в таблицу `usa_stand`.
+- Проверьте, что всё получилось :)
+
+```{r}
+usa <- USArrests
+# skim(___)
+
+# usa_stand <- ___(___ , ___, ~ as.vector(scale(.)))
+# ___
+
+# rownames(usa_stand) <- rownames(USArrests)
+```
+
+
+
+
+* Упражнение 2.
+
+Кластеризуйте отмасштабированные данные по арестам в США.
+В выборе числа кластеров доверьтесь интуиции.
+
+```{r}
+# k_means_usa <- kmeans(___, centers = ___)
+```
+
+
+
+* Упражнение 3.
+
+Визуализируйте результаты кластеризации данных по арестам `k_means_usa`.
+
+```{r}
+# fviz_cluster(___, data = ___, ellipse.type = "convex")
+```
+
+- Пересекаются ли кластеры?
+- Разумно ли изменить количество кластеров?
+
+
+
+* Упражнение 4.
+
+Проверьте, совпадает ли выбранное вами число кластеров для `usa_stand` с оптимальным.
+Изобразите все три диаграммы вместе.
+
+```{r}
+# p1 <- fviz_nbclust(___, kmeans, method = "wss") +
+#  labs(subtitle = "Elbow method")
+# p2 <- fviz_nbclust(___, ___, method = "silhouette") +
+#  labs(subtitle = "Silhouette method")
+# p3 <- fviz_nbclust(___, ___, method = "gap_stat") +
+#  labs(subtitle = "Gap statistic method")
+# p1
+# p2
+# p3
+```
+
+
+* Упражнение 5
+
+- Сделайте иерархическую кластеризацию с четыремя группами на данных об арестах.
+
+- Визуализируйте результат кластеризации и сделайте подписи цветными.
+
+```{r}
+# usa_hcl <- hcut(___, k = ___)
+# fviz_dend(___,
+#          cex = 0.5, # размер подписи
+#          color_labels_by_k = ___) # цвет подписей по группам
+```
+
+
+* Упражнение 6.
+
+Визуализируйте корреляции в данных об арестах `usa` и сгруппируйте их по двум кластерам.
+Замените кружочки на квадраты, передав аргументу `method` значение `shade`.
+
+```{r}
+# usa_cor <- cor(___)
+# corrplot(___, order = ___, addrect = ___, ___ = ___)
+```
+
+* Упражнение 7.
+
+Добавьте к исходным данным `usa` кластеры, полученные с помощью иерархической кластеризации:
+```{r}
+# usa_plus2 <- mutate(___, cluster = ___)
+# glimpse(___)
+```
+
+Визуализации [кластеров в известных наборах данных] (https://cran.r-project.org/web/packages/dendextend/vignettes/Cluster_Analysis.html)
+
+Ура! :)
+
+# Множественная регрессия
+
+```{r}
+model_a = lm(data = diamonds, price ~ carat + x + y + z)
+summary(model_a)
+```
+
+Современный подход: всё в табличку!
+```{r}
+res = tidy(model_a)
+res
+
+res2 = glance(model_a)
+res2
+```
+
+Доверительные интервалы для коэффициентов:
+```{r}
+confint(model_a, level = 0.8)
+```
+
+Тест Вальда на сравнение двух вложенных моделей:
+```{r}
+library(lmtest)
+model_b = lm(data = diamonds, price ~ carat)
+waldtest(model_b, model_a)
+```
+
+Ура :)
+
+
+
+
+
